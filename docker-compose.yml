@@ -18,7 +18,7 @@ services:
 
     environment:
       POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_POSTGRES_PASSWORD:?AIRFLOW_POSTGRES_PASSWORD is required}
       POSTGRES_DB: airflow
 
     volumes:
@@ -45,7 +45,7 @@ services:
 
     environment:
       POSTGRES_USER: ecommerce
-      POSTGRES_PASSWORD: ecommerce123
+      POSTGRES_PASSWORD: ${INTERNAL_POSTGRES_PASSWORD:?INTERNAL_POSTGRES_PASSWORD is required}
       POSTGRES_DB: ecommerce_internal
 
     ports:
@@ -73,9 +73,9 @@ services:
       - ecommerce-network
 
     environment:
-      POSTGRES_USER: warehouse
-      POSTGRES_PASSWORD: warehouse123
-      POSTGRES_DB: ecommerce_warehouse
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
 
     ports:
       - "5452:5432"
@@ -100,6 +100,11 @@ services:
     image: spark:python3
     container_name: pipeline-spark-master
     hostname: spark-master
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
 
     networks:
       - ecommerce-network
@@ -194,7 +199,7 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
 
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: >-
-        postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+        postgresql+psycopg2://airflow:${AIRFLOW_POSTGRES_PASSWORD:?AIRFLOW_POSTGRES_PASSWORD is required}@airflow-postgres:5432/airflow
 
 
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -263,7 +268,7 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
 
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: >-
-        postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+        postgresql+psycopg2://airflow:${AIRFLOW_POSTGRES_PASSWORD:?AIRFLOW_POSTGRES_PASSWORD is required}@airflow-postgres:5432/airflow
 
 
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -363,7 +368,7 @@ services:
 
 
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: >-
-        postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+        postgresql+psycopg2://airflow:${AIRFLOW_POSTGRES_PASSWORD:?AIRFLOW_POSTGRES_PASSWORD is required}@airflow-postgres:5432/airflow
 
 
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -378,9 +383,13 @@ services:
 
       # External API credentials and ingestion scope are injected at runtime.
       # Keep actual values outside version-controlled Compose configuration.
+           # External API credentials and ingestion scope are injected at runtime.
+      # Keep actual values outside version-controlled Compose configuration.
+
       EBAY_CLIENT_ID: ${EBAY_CLIENT_ID:-}
       EBAY_CLIENT_SECRET: ${EBAY_CLIENT_SECRET:-}
       EBAY_SEARCH_QUERY: ${EBAY_SEARCH_QUERY:-}
+      EBAY_SEARCH_QUERIES: ${EBAY_SEARCH_QUERIES:-}
       EBAY_MARKETPLACE_ID: ${EBAY_MARKETPLACE_ID:-}
       EBAY_PAGE_SIZE: ${EBAY_PAGE_SIZE:-100}
 
@@ -392,13 +401,14 @@ services:
       MELI_SEARCH_QUERY: ${MELI_SEARCH_QUERY:-}
       MELI_PAGE_SIZE: ${MELI_PAGE_SIZE:-50}
 
-      BESTBUY_API_KEY: ${BESTBUY_API_KEY:-}
-      BESTBUY_QUERY: ${BESTBUY_QUERY:-}
-      BESTBUY_CURRENCY: ${BESTBUY_CURRENCY:-}
-      BESTBUY_PAGE_SIZE: ${BESTBUY_PAGE_SIZE:-100}
+      RAKUTEN_APPLICATION_ID: ${RAKUTEN_APPLICATION_ID:-}
+      RAKUTEN_ACCESS_KEY: ${RAKUTEN_ACCESS_KEY:-}
+      RAKUTEN_AFFILIATE_ID: ${RAKUTEN_AFFILIATE_ID:-}
+      RAKUTEN_SEARCH_QUERY: ${RAKUTEN_SEARCH_QUERY:-}
+      RAKUTEN_SEARCH_QUERIES: ${RAKUTEN_SEARCH_QUERIES:-}
+      RAKUTEN_PAGE_SIZE: ${RAKUTEN_PAGE_SIZE:-30}
 
       EXTERNAL_MAX_PAGES: ${EXTERNAL_MAX_PAGES:-1}
-
 
 
     volumes:

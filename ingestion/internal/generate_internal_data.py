@@ -1,4 +1,5 @@
 import random
+import os
 from datetime import datetime, timedelta
 
 import psycopg2
@@ -9,11 +10,11 @@ from psycopg2.extras import execute_values
 fake = Faker("en_US")
 
 DB_CONFIG = {
-    "host": "localhost",
-    "port": 5451,
-    "database": "ecommerce_internal",
-    "user": "ecommerce",
-    "password": "ecommerce123",
+    "host": os.getenv("INTERNAL_POSTGRES_HOST", "localhost").strip(),
+    "port": int(os.getenv("INTERNAL_POSTGRES_PORT", "5451")),
+    "database": os.getenv("INTERNAL_POSTGRES_DB", "ecommerce_internal").strip(),
+    "user": os.getenv("INTERNAL_POSTGRES_USER", "ecommerce").strip(),
+    "password": required_env("INTERNAL_POSTGRES_PASSWORD"),
 }
 
 # ------------------------------------------------------------

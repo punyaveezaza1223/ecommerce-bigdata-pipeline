@@ -23,12 +23,19 @@ PROCESSED_PATH = (
 # DATA WAREHOUSE CONNECTION
 # ============================================================
 
+def required_env(name):
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
 DB_CONFIG = {
-    "host": "127.0.0.1",
-    "port": 5452,
-    "database": "ecommerce_warehouse",
-    "user": "warehouse",
-    "password": "warehouse123",
+    "host": os.getenv("POSTGRES_HOST", "127.0.0.1").strip(),
+    "port": int(os.getenv("POSTGRES_PORT", "5452")),
+    "database": required_env("POSTGRES_DB"),
+    "user": required_env("POSTGRES_USER"),
+    "password": required_env("POSTGRES_PASSWORD"),
 }
 
 

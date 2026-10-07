@@ -1,8 +1,9 @@
+import os
+
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
     current_timestamp,
-    expr,
     lit,
     to_date,
 )
@@ -24,20 +25,30 @@ spark.sparkContext.setLogLevel("WARN")
 # Config
 # ============================================================
 
-INPUT_PATH = "/opt/spark/data/processed/products/external_products"
+PRODUCTION_INPUT_PATH = "/opt/spark/data/processed/products/external_products"
+INPUT_PATH = os.getenv("WAREHOUSE_INPUT_PATH", "").strip() or PRODUCTION_INPUT_PATH
 
-JDBC_URL = "jdbc:postgresql://warehouse-postgres:5432/ecommerce_warehouse"
+def required_env(name):
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "warehouse-postgres").strip()
+POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432").strip()
+POSTGRES_DB = required_env("POSTGRES_DB")
+POSTGRES_USER = required_env("POSTGRES_USER")
+POSTGRES_PASSWORD = required_env("POSTGRES_PASSWORD")
+WAREHOUSE_DB = os.getenv("WAREHOUSE_DB", POSTGRES_DB).strip() or POSTGRES_DB
+
+JDBC_URL = f"jdbc:postgresql://{POSTGRES_HOST}:{POSTGRES_PORT}/{WAREHOUSE_DB}"
 
 PROPERTIES = {
-    "user": "warehouse",
-    "password": "warehouse123",
+    "user": POSTGRES_USER,
+    "password": POSTGRES_PASSWORD,
     "driver": "org.postgresql.Driver",
 }
-
-BEST_BUY_PLATFORM = "best_buy"
-BEST_BUY_RETENTION_HOURS = 72
-
-
 # ============================================================
 # Helper
 # ============================================================
@@ -53,49 +64,6 @@ def read_table(table_name):
     )
 
 
-def execute_warehouse_sql(statement: str) -> int:
-    """Execute warehouse cleanup SQL through the existing JDBC connection."""
-    connection = spark._sc._gateway.jvm.java.sql.DriverManager.getConnection(
-        JDBC_URL,
-        PROPERTIES["user"],
-        PROPERTIES["password"],
-    )
-    try:
-        cursor = connection.createStatement()
-        try:
-            return cursor.executeUpdate(statement)
-        finally:
-            cursor.close()
-    finally:
-        connection.close()
-
-
-def purge_expired_best_buy_content() -> tuple[int, int]:
-    """Delete Best Buy content that exceeds its 72-hour retention window."""
-    expired_facts = execute_warehouse_sql(
-        """
-        DELETE FROM fact_external_product AS fact
-        USING dim_platform AS platform
-        WHERE fact.platform_key = platform.platform_key
-          AND platform.platform_name = 'best_buy'
-          AND COALESCE(fact.collected_at, fact.loaded_at)
-              < CURRENT_TIMESTAMP - INTERVAL '72 hours'
-        """
-    )
-    expired_products = execute_warehouse_sql(
-        """
-        DELETE FROM dim_product AS product
-        WHERE product.source_system = 'best_buy'
-          AND NOT EXISTS (
-              SELECT 1
-              FROM fact_external_product AS fact
-              WHERE fact.product_key = product.product_key
-          )
-        """
-    )
-    return expired_facts, expired_products
-
-
 # ============================================================
 # Read processed data
 # ============================================================
@@ -103,10 +71,6 @@ def purge_expired_best_buy_content() -> tuple[int, int]:
 print("=" * 60)
 print("READING SPARK PROCESSED DATA")
 print("=" * 60)
-
-expired_fact_count, expired_product_count = purge_expired_best_buy_content()
-print(f"Expired Best Buy facts removed    : {expired_fact_count:,}")
-print(f"Expired Best Buy products removed : {expired_product_count:,}")
 
 df = spark.read.parquet(INPUT_PATH)
 
@@ -130,16 +94,48 @@ df = df.filter(
     col("observation_date").isNotNull()
 )
 
-# Best Buy API content is not eligible for Warehouse storage after 72 hours.
-df = df.filter(
-    (col("platform") != BEST_BUY_PLATFORM)
-    | (
-        col("collected_at").cast("timestamp")
-        >= expr(f"current_timestamp() - INTERVAL {BEST_BUY_RETENTION_HOURS} HOURS")
+print(f"Valid rows : {df.count():,}")
+
+
+# ============================================================
+# Validate date dimension before any warehouse write
+# ============================================================
+
+input_dates = (
+    df.select(
+        col("observation_date").alias("full_date")
     )
+    .distinct()
 )
 
-print(f"Valid rows : {df.count():,}")
+warehouse_dates = (
+    read_table("dim_date")
+    .select(
+        to_date(col("full_date")).alias("full_date")
+    )
+    .distinct()
+)
+
+missing_dates = (
+    input_dates
+    .join(
+        warehouse_dates,
+        on="full_date",
+        how="left_anti",
+    )
+    .orderBy("full_date")
+    .collect()
+)
+
+if missing_dates:
+    missing_date_values = ", ".join(
+        row["full_date"].isoformat()
+        for row in missing_dates
+    )
+    raise RuntimeError(
+        "Missing observation dates in dim_date: "
+        f"{missing_date_values}"
+    )
 
 
 # ============================================================
@@ -331,7 +327,7 @@ fact_source = (
     .join(
         dim_platform.alias("p"),
         col("s.platform") == col("p.platform_name"),
-        "inner",
+        "left",
     )
 
     # product -> product_key
@@ -344,16 +340,33 @@ fact_source = (
                 == col("dp.source_product_id")
             )
         ),
-        "inner",
+        "left",
     )
 
     # date -> date_key
     .join(
         dim_date.alias("d"),
         col("s.observation_date") == col("d.full_date"),
-        "inner",
+        "left",
+    )
+)
+
+unresolved_facts = fact_source.filter(
+    col("d.date_key").isNull()
+    | col("dp.product_key").isNull()
+    | col("p.platform_key").isNull()
+)
+
+unresolved_fact_count = unresolved_facts.count()
+
+if unresolved_fact_count > 0:
+    raise RuntimeError(
+        "Unable to resolve warehouse dimension keys for "
+        f"{unresolved_fact_count} input record(s)"
     )
 
+fact_source = (
+    fact_source
     .select(
         col("d.date_key").alias("date_key"),
         col("dp.product_key").alias("product_key"),

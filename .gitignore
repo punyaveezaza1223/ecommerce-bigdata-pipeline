@@ -23,6 +23,7 @@ env/
 # ============================================================
 data/raw/
 data/processed/
+data/processed_test/
 data/curated/
 data/cleaned/
 data/tmp/

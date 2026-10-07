@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
@@ -6,7 +9,6 @@ from pyspark.sql.functions import (
     trim,
     when,
     current_timestamp,
-    expr,
     to_date,
     to_timestamp,
 )
@@ -19,11 +21,10 @@ from pyspark.sql.types import DoubleType, LongType, StringType
 
 EBAY_PATH = "/opt/spark/data/raw/external/ebay"
 MERCADO_LIBRE_PATH = "/opt/spark/data/raw/external/mercado_libre"
-BEST_BUY_PATH = "/opt/spark/data/raw/external/best_buy"
+RAKUTEN_PATH = "/opt/spark/data/raw/external/rakuten"
 
-OUTPUT_PATH = "/opt/spark/data/processed/products/external_products"
-BEST_BUY_PLATFORM = "best_buy"
-BEST_BUY_RETENTION_HOURS = 72
+PRODUCTION_OUTPUT_PATH = "/opt/spark/data/processed/products/external_products"
+OUTPUT_PATH = os.getenv("SPARK_PRODUCTS_OUTPUT_PATH", "").strip() or PRODUCTION_OUTPUT_PATH
 
 
 # ============================================================
@@ -58,6 +59,7 @@ COMMON_COLUMNS = [
     "sold_count",
     "seller_name",
     "product_url",
+    "image_url",
     "collected_at",
     "source_updated_at",
     "ingestion_timestamp",
@@ -118,6 +120,10 @@ def standardize(df, platform_name):
         .withColumn(
             "product_url",
             trim(col("product_url").cast(StringType()))
+        )
+        .withColumn(
+            "image_url",
+            trim(col("image_url").cast(StringType()))
         )
         .withColumn(
             "raw_source",
@@ -240,6 +246,24 @@ def standardize(df, platform_name):
     return df
 
 
+def read_optional_source(path, platform_name):
+    """Read a Raw Parquet source when it is present and contains Parquet data."""
+    source_path = Path(path)
+    if not source_path.is_dir():
+        print(f"Skipping {platform_name}: input path does not exist")
+        return None
+
+    if not any(source_path.rglob("*.parquet")):
+        print(f"Skipping {platform_name}: no Parquet input files found")
+        return None
+
+    try:
+        return spark.read.parquet(path)
+    except Exception:
+        print(f"Skipping {platform_name}: Parquet input could not be read")
+        return None
+
+
 # ============================================================
 # READ RAW DATA
 # ============================================================
@@ -248,52 +272,26 @@ print("=" * 60)
 print("SPARK EXTERNAL PRODUCTS ETL")
 print("=" * 60)
 
-print("\nReading eBay...")
-ebay_df = spark.read.parquet(EBAY_PATH)
+SOURCE_CONFIGS = [
+    ("ebay", EBAY_PATH),
+    ("mercado_libre", MERCADO_LIBRE_PATH),
+    ("rakuten", RAKUTEN_PATH),
+]
 
-print("Reading Mercado Libre...")
-mercado_libre_df = spark.read.parquet(MERCADO_LIBRE_PATH)
-
-print("Reading Best Buy...")
-best_buy_df = spark.read.parquet(BEST_BUY_PATH)
-
-
-# ============================================================
-# RAW COUNTS
-# ============================================================
-
-ebay_raw_count = ebay_df.count()
-mercado_libre_raw_count = mercado_libre_df.count()
-best_buy_raw_count = best_buy_df.count()
-
+available_sources = []
 print("\nRAW COUNTS")
 print("-" * 60)
+for platform_name, input_path in SOURCE_CONFIGS:
+    source_df = read_optional_source(input_path, platform_name)
+    if source_df is None:
+        continue
 
-print(f"eBay          : {ebay_raw_count:,}")
-print(f"Mercado Libre : {mercado_libre_raw_count:,}")
-print(f"Best Buy      : {best_buy_raw_count:,}")
+    raw_count = source_df.count()
+    print(f"{platform_name:<15}: {raw_count:,}")
+    available_sources.append((platform_name, standardize(source_df, platform_name)))
 
-
-# ============================================================
-# STANDARDIZE
-# ============================================================
-
-print("\nStandardizing schemas...")
-
-ebay_clean = standardize(
-    ebay_df,
-    "ebay"
-)
-
-mercado_libre_clean = standardize(
-    mercado_libre_df,
-    "mercado_libre"
-)
-
-best_buy_clean = standardize(
-    best_buy_df,
-    "best_buy"
-)
+if not available_sources:
+    raise RuntimeError("No readable external Raw Parquet sources were found")
 
 
 # ============================================================
@@ -302,17 +300,9 @@ best_buy_clean = standardize(
 
 print("Combining platforms...")
 
-combined_df = (
-    ebay_clean
-    .unionByName(
-        mercado_libre_clean,
-        allowMissingColumns=True
-    )
-    .unionByName(
-        best_buy_clean,
-        allowMissingColumns=True
-    )
-)
+combined_df = available_sources[0][1]
+for _, source_df in available_sources[1:]:
+    combined_df = combined_df.unionByName(source_df, allowMissingColumns=True)
 
 
 # ============================================================
@@ -326,22 +316,6 @@ combined_df = combined_df.filter(
     & (trim(col("product_name")) != "")
     & col("observation_date").isNotNull()
 )
-
-
-# Best Buy API content cannot remain in the processed layer beyond 72 hours.
-# The overwrite below removes expired Best Buy records from prior processed output.
-before_best_buy_retention = combined_df.count()
-
-combined_df = combined_df.filter(
-    (col("platform") != BEST_BUY_PLATFORM)
-    | (
-        col("collected_at")
-        >= expr(f"current_timestamp() - INTERVAL {BEST_BUY_RETENTION_HOURS} HOURS")
-    )
-)
-
-after_best_buy_retention = combined_df.count()
-best_buy_expired_removed = before_best_buy_retention - after_best_buy_retention
 
 
 # ============================================================
@@ -408,10 +382,6 @@ print("=" * 60)
 
 print(
     f"Rows before dedup : {before_dedup:,}"
-)
-
-print(
-    f"Expired Best Buy removed: {best_buy_expired_removed:,}"
 )
 
 print(
