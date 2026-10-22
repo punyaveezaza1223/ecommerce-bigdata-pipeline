@@ -1,0 +1,1 @@
+(Invoke-RestMethod -Uri "https://api.ipify.org").Trim()   ขอip

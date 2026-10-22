@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import requests
 
 
@@ -18,6 +20,35 @@ TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
 ITEM_URL = "https://api.ebay.com/buy/browse/v1/item/{item_id}"
 REQUEST_TIMEOUT_SECONDS = 30
+MAX_PAGE_SIZE = 200
+MAX_PAGES = 50
+
+# Keep every eBay Raw batch compatible with the historical Parquet schema.
+# In particular, Search summaries can omit rating/review fields entirely;
+# Pandas would otherwise infer a Parquet null (physical INT32) column.
+RAW_SCHEMA = pa.schema(
+    [
+        pa.field("platform", pa.string()),
+        pa.field("external_product_id", pa.string()),
+        pa.field("product_name", pa.string()),
+        pa.field("category", pa.string()),
+        pa.field("brand", pa.string()),
+        pa.field("currency", pa.string()),
+        pa.field("price", pa.float64()),
+        pa.field("original_price", pa.float64()),
+        pa.field("discount_percent", pa.float64()),
+        pa.field("rating", pa.string()),
+        pa.field("review_count", pa.float64()),
+        pa.field("sold_count", pa.null()),
+        pa.field("seller_name", pa.string()),
+        pa.field("product_url", pa.string()),
+        pa.field("image_url", pa.string()),
+        pa.field("collected_at", pa.timestamp("ms", tz="UTC")),
+        pa.field("source_updated_at", pa.string()),
+        pa.field("ingestion_timestamp", pa.timestamp("ms", tz="UTC")),
+        pa.field("raw_source", pa.string()),
+    ]
+)
 
 
 def required_env(name: str) -> str:
@@ -78,6 +109,37 @@ def positive_int_env(
         )
 
     return value
+
+
+def boolean_env(name: str, default: bool = False) -> bool:
+    """Read a boolean environment variable with an explicit error on typos."""
+    raw_value = os.getenv(name, str(default)).strip().lower()
+
+    if raw_value in {"1", "true", "yes", "on"}:
+        return True
+
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+
+    raise RuntimeError(
+        f"{name} must be a boolean (true or false)"
+    )
+
+
+def ebay_max_pages() -> int:
+    """Prefer eBay's limit while retaining the legacy shared setting."""
+    if os.getenv("EBAY_MAX_PAGES", "").strip():
+        return positive_int_env(
+            "EBAY_MAX_PAGES",
+            default=1,
+            maximum=MAX_PAGES,
+        )
+
+    return positive_int_env(
+        "EXTERNAL_MAX_PAGES",
+        default=1,
+        maximum=MAX_PAGES,
+    )
 
 
 def application_token(
@@ -188,6 +250,23 @@ def money_value(
         return None
 
 
+def number_value(value: Any) -> float | None:
+    """Convert an API scalar to a numeric value for the Raw schema."""
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def string_value(value: Any) -> str | None:
+    """Return a non-empty string, preserving the historical Raw type."""
+    if value is None:
+        return None
+
+    value = str(value).strip()
+    return value or None
+
+
 def category_value(
     item: dict[str, Any],
 ) -> str | None:
@@ -208,6 +287,21 @@ def category_value(
                 "categoryId"
             )
         )
+
+    return None
+
+
+def image_url_value(item: dict[str, Any]) -> str | None:
+    """Return the primary image URL supplied by Browse Search or Item."""
+    image = item.get("image") or {}
+
+    if not isinstance(image, dict):
+        return None
+
+    for key in ("imageUrl", "url"):
+        value = image.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
 
     return None
 
@@ -279,7 +373,7 @@ def normalize_item(
         "category":
             category_value(item),
         "brand":
-            item.get("brand"),
+            string_value(item.get("brand")),
         "currency":
             (
                 item.get("price")
@@ -292,13 +386,9 @@ def normalize_item(
         "discount_percent":
             discount_percent,
         "rating":
-            review.get(
-                "averageRating"
-            ),
+            string_value(review.get("averageRating")),
         "review_count":
-            review.get(
-                "reviewCount"
-            ),
+            number_value(review.get("reviewCount")),
         "sold_count":
             None,
         "seller_name":
@@ -309,6 +399,7 @@ def normalize_item(
             item.get(
                 "itemWebUrl"
             ),
+        "image_url": image_url_value(item),
         "collected_at":
             collected_at,
         "source_updated_at":
@@ -337,13 +428,20 @@ def main() -> None:
     page_size = positive_int_env(
         "EBAY_PAGE_SIZE",
         default=100,
-        maximum=200,
+        maximum=MAX_PAGE_SIZE,
     )
 
-    max_pages = positive_int_env(
-        "EXTERNAL_MAX_PAGES",
-        default=1,
-        maximum=100,
+    # EBAY_MAX_PAGES lets eBay use a broader search window without
+    # increasing the page count used by Rakuten and other integrations.
+    # EXTERNAL_MAX_PAGES remains a backward-compatible fallback.
+    max_pages = ebay_max_pages()
+
+    # Browse Search already supplies every field required by our Raw schema.
+    # Item Detail costs one extra Browse call per unique listing, so keep it
+    # opt-in for rare enrichment/backfill runs.
+    fetch_item_details = boolean_env(
+        "EBAY_FETCH_ITEM_DETAILS",
+        default=False,
     )
 
     OUTPUT_DIR.mkdir(
@@ -360,6 +458,7 @@ def main() -> None:
     records: list[
         dict[str, Any]
     ] = []
+    seen_item_ids: set[str] = set()
 
     with requests.Session() as session:
         token = application_token(
@@ -372,6 +471,17 @@ def main() -> None:
             "X-EBAY-C-MARKETPLACE-ID":
                 marketplace_id,
         }
+
+        if fetch_item_details:
+            print(
+                "eBay Item Detail enrichment is enabled; "
+                "this adds one API call for each unique listing."
+            )
+        else:
+            print(
+                "Using eBay Search summaries only; "
+                "Item Detail enrichment is disabled."
+            )
 
         for query in queries:
             query_count = 0
@@ -419,13 +529,21 @@ def main() -> None:
                         )
                     )
 
+                    # Search terms overlap.  Deduplicate before any optional
+                    # Detail request so the same listing never consumes quota
+                    # twice in a single ingestion run.
+                    if not item_id or item_id in seen_item_ids:
+                        continue
+
+                    seen_item_ids.add(item_id)
+
                     details = (
                         get_item_details(
                             session,
                             headers,
                             item_id,
                         )
-                        if item_id
+                        if fetch_item_details
                         else {}
                     )
 
@@ -485,19 +603,26 @@ def main() -> None:
         ]
     )
 
+    # Include UTC collection time in the filename so multiple
+    # ingestion runs on the same day do not overwrite each other.
     output_file = (
         OUTPUT_DIR
         / (
             f"ebay_"
-            f"{collected_at:%Y-%m-%d}"
+            f"{collected_at:%Y-%m-%d_%H%M%S}"
             f".parquet"
         )
     )
 
-    frame.to_parquet(
+    table = pa.Table.from_pandas(
+        frame,
+        schema=RAW_SCHEMA,
+        preserve_index=False,
+    )
+
+    pq.write_table(
+        table,
         output_file,
-        index=False,
-        engine="pyarrow",
         coerce_timestamps="ms",
         allow_truncated_timestamps=True,
     )

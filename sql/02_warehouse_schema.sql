@@ -223,8 +223,13 @@ INSERT INTO dim_platform (
 )
 VALUES
     ('internal', 'internal'),
-    ('shopee', 'marketplace'),
-    ('lazada', 'marketplace'),
-    ('amazon', 'marketplace')
+    ('ebay', 'marketplace'),
+    ('rakuten', 'marketplace'),
+    ('stockx', 'marketplace'),
+    ('etsy', 'marketplace'),
+    ('advice_th', 'marketplace'),
+    -- Amazon Reviews 2023 is retained as historical product metadata. It is
+    -- not a price-snapshot source because it has no observation timestamp.
+    ('amazon_2023', 'marketplace')
 ON CONFLICT (platform_name)
 DO NOTHING;

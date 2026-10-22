@@ -1,12 +1,11 @@
+
 networks:
   ecommerce-network:
     driver: bridge
     driver_opts:
       com.docker.network.bridge.name: ecommerce-br
 
-
 services:
-
   # ==========================================================
   # 1. Airflow Metadata PostgreSQL
   # ==========================================================
@@ -15,24 +14,19 @@ services:
     container_name: pipeline-airflow-postgres
     networks:
       - ecommerce-network
-
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: ${AIRFLOW_POSTGRES_PASSWORD:?AIRFLOW_POSTGRES_PASSWORD is required}
       POSTGRES_DB: airflow
-
     volumes:
       - airflow_postgres_data:/var/lib/postgresql/data
-
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
       interval: 5s
       timeout: 5s
       retries: 20
       start_period: 30s
-
     restart: unless-stopped
-
 
   # ==========================================================
   # 2. Internal PostgreSQL
@@ -42,26 +36,20 @@ services:
     container_name: pipeline-internal-postgres
     networks:
       - ecommerce-network
-
     environment:
       POSTGRES_USER: ecommerce
       POSTGRES_PASSWORD: ${INTERNAL_POSTGRES_PASSWORD:?INTERNAL_POSTGRES_PASSWORD is required}
       POSTGRES_DB: ecommerce_internal
-
     ports:
       - "5451:5432"
-
     volumes:
       - internal_postgres_data:/var/lib/postgresql/data
-
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ecommerce -d ecommerce_internal"]
       interval: 5s
       timeout: 5s
       retries: 20
-
     restart: unless-stopped
-
 
   # ==========================================================
   # 3. Warehouse PostgreSQL
@@ -71,27 +59,22 @@ services:
     container_name: pipeline-warehouse-postgres
     networks:
       - ecommerce-network
-
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
-
     ports:
       - "5452:5432"
-
     volumes:
       - warehouse_postgres_data:/var/lib/postgresql/data
-
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U warehouse -d ecommerce_warehouse"]
+      test:
+        - CMD-SHELL
+        - 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
       interval: 5s
       timeout: 5s
       retries: 20
-
     restart: unless-stopped
-
-
 
   # ==========================================================
   # 4. Spark Master
@@ -100,15 +83,12 @@ services:
     image: spark:python3
     container_name: pipeline-spark-master
     hostname: spark-master
-
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-
     networks:
       - ecommerce-network
-
     command:
       - /opt/spark/bin/spark-class
       - org.apache.spark.deploy.master.Master
@@ -118,21 +98,16 @@ services:
       - "7077"
       - --webui-port
       - "8080"
-
     ports:
       - "7078:7077"
       - "8181:8080"
-
     volumes:
       - ./data:/opt/spark/data
       - ./spark:/opt/spark/jobs
       - ./data:/opt/airflow/data
       - ./spark:/opt/airflow/spark
       - ./jars/postgresql-42.7.3.jar:/opt/spark/jars/postgresql-42.7.3.jar
-
     restart: unless-stopped
-
-
 
   # ==========================================================
   # 5. Spark Worker
@@ -141,13 +116,10 @@ services:
     image: spark:python3
     container_name: pipeline-spark-worker
     hostname: spark-worker
-
     networks:
       - ecommerce-network
-
     depends_on:
       - spark-master
-
     command:
       - /opt/spark/bin/spark-class
       - org.apache.spark.deploy.worker.Worker
@@ -158,20 +130,15 @@ services:
       - "1536M"
       - --webui-port
       - "8081"
-
     ports:
       - "8182:8081"
-
     volumes:
       - ./data:/opt/spark/data
       - ./spark:/opt/spark/jobs
       - ./data:/opt/airflow/data
       - ./spark:/opt/airflow/spark
       - ./jars/postgresql-42.7.3.jar:/opt/spark/jars/postgresql-42.7.3.jar
-
     restart: unless-stopped
-
-
 
   # ==========================================================
   # 6. Airflow Init
@@ -180,36 +147,20 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.airflow
-
     image: ecommerce-airflow:2.10.5-spark4.2
-
     container_name: pipeline-airflow-init
-
     networks:
       - ecommerce-network
-
-
     depends_on:
       airflow-postgres:
         condition: service_healthy
-
-
     environment:
-
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: >-
         postgresql+psycopg2://airflow:${AIRFLOW_POSTGRES_PASSWORD:?AIRFLOW_POSTGRES_PASSWORD is required}@airflow-postgres:5432/airflow
-
-
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
-
-
     user: "${AIRFLOW_UID:-50000}:0"
-
-
     volumes:
       - ./dags:/opt/airflow/dags
       - ./ingestion:/opt/airflow/ingestion
@@ -217,10 +168,7 @@ services:
       - ./plugins:/opt/airflow/plugins
       - ./data:/opt/airflow/data
       - ./spark:/opt/airflow/spark
-      - ./temp_shopee:/opt/airflow/temp_shopee
-      - ./temp_lazada:/opt/airflow/temp_lazada
-
-
+      - ./scripts:/opt/airflow/scripts:ro
     command: >
       bash -c "
       airflow db migrate &&
@@ -233,240 +181,179 @@ services:
       --email admin@example.com || true
       "
 
-
-
   # ==========================================================
   # 7. Airflow Webserver
   # ==========================================================
   airflow-webserver:
-
     build:
       context: .
       dockerfile: Dockerfile.airflow
-
     image: ecommerce-airflow:2.10.5-spark4.2
-
     container_name: pipeline-airflow-webserver
-
-
     networks:
       - ecommerce-network
-
-
     depends_on:
-
       airflow-postgres:
         condition: service_healthy
-
       airflow-init:
         condition: service_completed_successfully
-
-
-
     environment:
-
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: >-
         postgresql+psycopg2://airflow:${AIRFLOW_POSTGRES_PASSWORD:?AIRFLOW_POSTGRES_PASSWORD is required}@airflow-postgres:5432/airflow
-
-
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-
-
     volumes:
-
       - ./dags:/opt/airflow/dags
       - ./ingestion:/opt/airflow/ingestion
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
       - ./data:/opt/airflow/data
       - ./spark:/opt/airflow/spark
-
-
+      - ./scripts:/opt/airflow/scripts:ro
     ports:
-
       - "8190:8080"
-
-
-    command:
-
-      webserver
-
-
+    command: webserver
     healthcheck:
-
       test:
-        [
-          "CMD",
-          "curl",
-          "--fail",
-          "http://localhost:8080/health"
-        ]
-
+        - CMD
+        - curl
+        - --fail
+        - http://localhost:8080/health
       interval: 10s
       timeout: 10s
       retries: 20
-
-
     restart: unless-stopped
-
-
-
 
   # ==========================================================
   # 8. Airflow Scheduler
   # ==========================================================
   airflow-scheduler:
-
-
     build:
-
       context: .
-
       dockerfile: Dockerfile.airflow
-
-
     image: ecommerce-airflow:2.10.5-spark4.2
-
-
     container_name: pipeline-airflow-scheduler
-
-
     hostname: airflow-scheduler
-
-
     networks:
-
       - ecommerce-network
-
-
-
     depends_on:
-
-
       airflow-postgres:
-
         condition: service_healthy
-
-
       airflow-init:
-
         condition: service_completed_successfully
-
-
       spark-master:
-
         condition: service_started
-
-
-
     environment:
-
-
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-
-
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: >-
         postgresql+psycopg2://airflow:${AIRFLOW_POSTGRES_PASSWORD:?AIRFLOW_POSTGRES_PASSWORD is required}@airflow-postgres:5432/airflow
-
-
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-
-
       AIRFLOW__SCHEDULER__HEARTBEAT_SEC: 10
-
       AIRFLOW__SCHEDULER__JOB_HEARTBEAT_SEC: 10
-
-
       SPARK_LOCAL_IP: 0.0.0.0
+      PIPELINE_DATA_ROOT: /opt/airflow/data
 
-      # External API credentials and ingestion scope are injected at runtime.
-      # Keep actual values outside version-controlled Compose configuration.
-           # External API credentials and ingestion scope are injected at runtime.
-      # Keep actual values outside version-controlled Compose configuration.
+      # Etsy Open API v3. The values are supplied from the untracked .env
+      # file; blank values make the collector stop before an API request.
+      ETSY_API_KEY: ${ETSY_API_KEY:-}
+      ETSY_SHARED_SECRET: ${ETSY_SHARED_SECRET:-}
 
+      # eBay API
       EBAY_CLIENT_ID: ${EBAY_CLIENT_ID:-}
       EBAY_CLIENT_SECRET: ${EBAY_CLIENT_SECRET:-}
       EBAY_SEARCH_QUERY: ${EBAY_SEARCH_QUERY:-}
       EBAY_SEARCH_QUERIES: ${EBAY_SEARCH_QUERIES:-}
       EBAY_MARKETPLACE_ID: ${EBAY_MARKETPLACE_ID:-}
       EBAY_PAGE_SIZE: ${EBAY_PAGE_SIZE:-100}
+      EBAY_MAX_PAGES: ${EBAY_MAX_PAGES:-}
+      EBAY_FETCH_ITEM_DETAILS: ${EBAY_FETCH_ITEM_DETAILS:-false}
 
-      MELI_ACCESS_TOKEN: ${MELI_ACCESS_TOKEN:-}
-      MELI_CLIENT_ID: ${MELI_CLIENT_ID:-}
-      MELI_CLIENT_SECRET: ${MELI_CLIENT_SECRET:-}
-      MELI_REFRESH_TOKEN: ${MELI_REFRESH_TOKEN:-}
-      MELI_SITE_ID: ${MELI_SITE_ID:-}
-      MELI_SEARCH_QUERY: ${MELI_SEARCH_QUERY:-}
-      MELI_PAGE_SIZE: ${MELI_PAGE_SIZE:-50}
-
+      # Rakuten Ichiba API
       RAKUTEN_APPLICATION_ID: ${RAKUTEN_APPLICATION_ID:-}
       RAKUTEN_ACCESS_KEY: ${RAKUTEN_ACCESS_KEY:-}
       RAKUTEN_AFFILIATE_ID: ${RAKUTEN_AFFILIATE_ID:-}
       RAKUTEN_SEARCH_QUERY: ${RAKUTEN_SEARCH_QUERY:-}
       RAKUTEN_SEARCH_QUERIES: ${RAKUTEN_SEARCH_QUERIES:-}
       RAKUTEN_PAGE_SIZE: ${RAKUTEN_PAGE_SIZE:-30}
+      RAKUTEN_MAX_PAGES: ${RAKUTEN_MAX_PAGES:-}
+      RAKUTEN_KEYWORD_CSV: ${RAKUTEN_KEYWORD_CSV:-}
+      RAKUTEN_REQUEST_BUDGET: ${RAKUTEN_REQUEST_BUDGET:-}
+      RAKUTEN_REQUEST_DELAY_SECONDS: ${RAKUTEN_REQUEST_DELAY_SECONDS:-2}
+      RAKUTEN_MAX_RETRIES: ${RAKUTEN_MAX_RETRIES:-5}
+      RAKUTEN_CHECKPOINT_PATH: ${RAKUTEN_CHECKPOINT_PATH:-/opt/airflow/data/checkpoints/rakuten.json}
+      RAKUTEN_METRICS_PATH: ${RAKUTEN_METRICS_PATH:-/opt/airflow/data/checkpoints/rakuten_metrics.jsonl}
+      RAKUTEN_DRY_RUN: ${RAKUTEN_DRY_RUN:-false}
 
+      # StockX API and OAuth
+      STOCKX_API_KEY: ${STOCKX_API_KEY:-}
+      STOCKX_CLIENT_ID: ${STOCKX_CLIENT_ID:-}
+      STOCKX_CLIENT_SECRET: ${STOCKX_CLIENT_SECRET:-}
+      STOCKX_ACCESS_TOKEN: ${STOCKX_ACCESS_TOKEN:-}
+      STOCKX_REFRESH_TOKEN: ${STOCKX_REFRESH_TOKEN:-}
+      STOCKX_TOKEN_FILE: /opt/airflow/.stockx-secrets/tokens.json
+      STOCKX_SEARCH_QUERIES: ${STOCKX_SEARCH_QUERIES:-sneakers,t-shirt,jeans,handbag,jacket}
+      STOCKX_PAGE_SIZE: ${STOCKX_PAGE_SIZE:-25}
+      STOCKX_MAX_PAGES: ${STOCKX_MAX_PAGES:-2}
+      STOCKX_REQUEST_DELAY_SECONDS: ${STOCKX_REQUEST_DELAY_SECONDS:-1}
+
+      # Shared ingestion fallback
       EXTERNAL_MAX_PAGES: ${EXTERNAL_MAX_PAGES:-1}
 
-
     volumes:
-
       - ./dags:/opt/airflow/dags
-
       - ./ingestion:/opt/airflow/ingestion
-
       - ./logs:/opt/airflow/logs
-
       - ./plugins:/opt/airflow/plugins
-
       - ./data:/opt/airflow/data
-
       - ./spark:/opt/airflow/spark
-
+      - ./scripts:/opt/airflow/scripts:ro
+      - ./config:/opt/airflow/config:ro
+      - ./.stockx-secrets:/opt/airflow/.stockx-secrets
       - /var/run/docker.sock:/var/run/docker.sock
 
-
-
-    command:
-
-      scheduler
-
-
-
+    command: scheduler
     healthcheck:
-
-
       test:
-
-        [
-          "CMD",
-          "airflow",
-          "jobs",
-          "check",
-          "--job-type",
-          "SchedulerJob"
-        ]
-
-
+        - CMD
+        - airflow
+        - jobs
+        - check
+        - --job-type
+        - SchedulerJob
       interval: 30s
-
       timeout: 10s
-
       retries: 5
-
-
-
     restart: unless-stopped
 
+  web-backend:
+    build: ./web/backend
+    container_name: pipeline-web-backend
+    networks:
+      - ecommerce-network
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@warehouse-postgres:5432/${POSTGRES_DB}
+      CORS_ORIGINS: http://localhost:5174
+    depends_on:
+      warehouse-postgres:
+        condition: service_healthy
+    ports:
+      - "8088:8000"
+    restart: unless-stopped
 
-
+  web-frontend:
+    build: ./web/frontend
+    container_name: pipeline-web-frontend
+    networks:
+      - ecommerce-network
+    environment:
+      VITE_API_URL: http://localhost:8088/api
+    depends_on:
+      - web-backend
+    ports:
+      - "5174:5174"
+    restart: unless-stopped
 
 volumes:
-
   airflow_postgres_data:
-
   internal_postgres_data:
-
   warehouse_postgres_data:

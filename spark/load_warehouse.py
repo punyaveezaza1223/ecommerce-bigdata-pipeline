@@ -8,6 +8,7 @@ from pyspark.sql.functions import (
     to_date,
 )
 
+
 # ============================================================
 # Spark
 # ============================================================
@@ -28,10 +29,13 @@ spark.sparkContext.setLogLevel("WARN")
 PRODUCTION_INPUT_PATH = "/opt/spark/data/processed/products/external_products"
 INPUT_PATH = os.getenv("WAREHOUSE_INPUT_PATH", "").strip() or PRODUCTION_INPUT_PATH
 
+
 def required_env(name):
     value = os.getenv(name, "").strip()
+
     if not value:
         raise RuntimeError(f"Missing required environment variable: {name}")
+
     return value
 
 
@@ -49,6 +53,8 @@ PROPERTIES = {
     "password": POSTGRES_PASSWORD,
     "driver": "org.postgresql.Driver",
 }
+
+
 # ============================================================
 # Helper
 # ============================================================
@@ -62,6 +68,202 @@ def read_table(table_name):
             properties=PROPERTIES,
         )
     )
+
+
+def ensure_observation_dates(df):
+    """
+    Add missing observation dates to dim_date before loading facts.
+
+    Existing date_key and day_of_week conventions are preserved.
+    Only missing dates are inserted. Existing rows are not modified.
+    """
+
+    print("\n" + "=" * 60)
+    print("CHECK DIM DATE")
+    print("=" * 60)
+
+    input_dates = {
+        row["full_date"]
+        for row in (
+            df.select(
+                col("observation_date").alias("full_date")
+            )
+            .distinct()
+            .collect()
+        )
+    }
+
+    existing_rows = (
+        read_table("dim_date")
+        .select(
+            "date_key",
+            "full_date",
+            "day_of_week",
+        )
+        .collect()
+    )
+
+    existing_dates = set()
+    weekday_styles = set()
+
+    for row in existing_rows:
+        full_date = row["full_date"]
+
+        if full_date is None:
+            raise RuntimeError(
+                "dim_date contains a NULL full_date"
+            )
+
+        expected_key = int(full_date.strftime("%Y%m%d"))
+
+        if row["date_key"] != expected_key:
+            raise RuntimeError(
+                "Existing dim_date date_key does not use YYYYMMDD. "
+                "Automatic date insertion stopped for safety."
+            )
+
+        existing_dates.add(full_date)
+
+        stored_weekday = row["day_of_week"]
+
+        if stored_weekday is None:
+            continue
+
+        iso_weekday = full_date.isoweekday()
+        postgres_weekday = iso_weekday % 7
+
+        if stored_weekday == iso_weekday:
+            weekday_styles.add("iso")
+
+        elif stored_weekday == postgres_weekday:
+            weekday_styles.add("postgres")
+
+        else:
+            raise RuntimeError(
+                "Unknown day_of_week convention in dim_date"
+            )
+
+    if len(weekday_styles) > 1:
+        raise RuntimeError(
+            "Mixed day_of_week conventions in dim_date"
+        )
+
+    # If the existing rows cannot distinguish conventions,
+    # use ISO weekday numbering as the default.
+    weekday_type = (
+        "DOW"
+        if "postgres" in weekday_styles
+        else "ISODOW"
+    )
+
+    missing_dates = sorted(
+        input_dates - existing_dates
+    )
+
+    print(f"Input observation dates : {len(input_dates):,}")
+    print(f"Existing dim_date rows  : {len(existing_rows):,}")
+    print(f"Missing dates           : {len(missing_dates):,}")
+
+    if not missing_dates:
+        print("All observation dates already exist.")
+        return
+
+    print(
+        "Adding missing dates: "
+        + ", ".join(d.isoformat() for d in missing_dates)
+    )
+
+    # Use PostgreSQL INSERT ... ON CONFLICT DO NOTHING
+    # so existing date rows are preserved.
+    connection = (
+        spark._jvm.java.sql.DriverManager.getConnection(
+            JDBC_URL,
+            POSTGRES_USER,
+            POSTGRES_PASSWORD,
+        )
+    )
+
+    try:
+        connection.setAutoCommit(False)
+
+        insert_sql = f"""
+            INSERT INTO dim_date (
+                date_key,
+                full_date,
+                day,
+                month,
+                month_name,
+                quarter,
+                year,
+                day_of_week,
+                day_name,
+                is_weekend
+            )
+            SELECT
+                TO_CHAR(d, 'YYYYMMDD')::INTEGER,
+                d,
+                EXTRACT(DAY FROM d)::INTEGER,
+                EXTRACT(MONTH FROM d)::INTEGER,
+                TRIM(TO_CHAR(d, 'Month')),
+                EXTRACT(QUARTER FROM d)::INTEGER,
+                EXTRACT(YEAR FROM d)::INTEGER,
+                EXTRACT({weekday_type} FROM d)::INTEGER,
+                TRIM(TO_CHAR(d, 'Day')),
+                EXTRACT(ISODOW FROM d) IN (6, 7)
+            FROM (
+                SELECT CAST(? AS DATE) AS d
+            ) AS dates
+            ON CONFLICT DO NOTHING
+        """
+
+        statement = connection.prepareStatement(insert_sql)
+
+        try:
+            for missing_date in missing_dates:
+                statement.setString(
+                    1,
+                    missing_date.isoformat()
+                )
+                statement.addBatch()
+
+            statement.executeBatch()
+            connection.commit()
+
+        finally:
+            statement.close()
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+    # Confirm that all required dates are now present.
+    updated_dates = {
+        row["full_date"]
+        for row in (
+            read_table("dim_date")
+            .select("full_date")
+            .distinct()
+            .collect()
+        )
+    }
+
+    still_missing = sorted(
+        input_dates - updated_dates
+    )
+
+    if still_missing:
+        raise RuntimeError(
+            "Unable to insert observation dates: "
+            + ", ".join(d.isoformat() for d in still_missing)
+        )
+
+    print(
+        f"Missing dim_date rows handled: {len(missing_dates):,}"
+    )
+    print("Date dimension validation passed.")
 
 
 # ============================================================
@@ -78,13 +280,13 @@ raw_count = df.count()
 
 print(f"Loaded rows: {raw_count:,}")
 
-# ต้องมี product id และ platform
+# Must have platform and external product ID.
 df = df.filter(
     col("platform").isNotNull()
     & col("external_product_id").isNotNull()
 )
 
-# วันที่ observation ของแต่ละ snapshot
+# Normalize snapshot observation date.
 df = df.withColumn(
     "observation_date",
     to_date(col("observation_date"))
@@ -98,44 +300,10 @@ print(f"Valid rows : {df.count():,}")
 
 
 # ============================================================
-# Validate date dimension before any warehouse write
+# Ensure date dimension is ready before warehouse fact writes
 # ============================================================
 
-input_dates = (
-    df.select(
-        col("observation_date").alias("full_date")
-    )
-    .distinct()
-)
-
-warehouse_dates = (
-    read_table("dim_date")
-    .select(
-        to_date(col("full_date")).alias("full_date")
-    )
-    .distinct()
-)
-
-missing_dates = (
-    input_dates
-    .join(
-        warehouse_dates,
-        on="full_date",
-        how="left_anti",
-    )
-    .orderBy("full_date")
-    .collect()
-)
-
-if missing_dates:
-    missing_date_values = ", ".join(
-        row["full_date"].isoformat()
-        for row in missing_dates
-    )
-    raise RuntimeError(
-        "Missing observation dates in dim_date: "
-        f"{missing_date_values}"
-    )
+ensure_observation_dates(df)
 
 
 # ============================================================
@@ -168,14 +336,8 @@ new_platforms = (
     )
     .withColumn(
         "platform_type",
-        col("platform_name")
+        lit("marketplace")
     )
-)
-
-# ให้ external platforms เป็น marketplace
-new_platforms = new_platforms.withColumn(
-    "platform_type",
-    lit("marketplace")
 )
 
 new_platform_count = new_platforms.count()
@@ -323,14 +485,14 @@ print("=" * 60)
 fact_source = (
     df.alias("s")
 
-    # platform -> platform_key
+    # Platform -> platform_key
     .join(
         dim_platform.alias("p"),
         col("s.platform") == col("p.platform_name"),
         "left",
     )
 
-    # product -> product_key
+    # Product -> product_key
     .join(
         dim_product.alias("dp"),
         (
@@ -343,7 +505,7 @@ fact_source = (
         "left",
     )
 
-    # date -> date_key
+    # Observation date -> date_key
     .join(
         dim_date.alias("d"),
         col("s.observation_date") == col("d.full_date"),
@@ -373,7 +535,10 @@ fact_source = (
         col("p.platform_key").alias("platform_key"),
 
         col("s.currency").alias("currency"),
-        col("s.price").cast("decimal(18,4)").alias("price"),
+        col("s.price")
+        .cast("decimal(18,4)")
+        .alias("price"),
+
         col("s.original_price")
         .cast("decimal(18,4)")
         .alias("original_price"),
@@ -404,7 +569,6 @@ fact_source = (
         current_timestamp()
         .alias("processed_at"),
     )
-
     .dropDuplicates(
         [
             "date_key",
@@ -457,7 +621,6 @@ print(
 # ============================================================
 
 if new_fact_count > 0:
-
     (
         new_facts
         .select(

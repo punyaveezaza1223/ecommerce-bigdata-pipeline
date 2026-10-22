@@ -1,3 +1,4 @@
+
 import os
 from pathlib import Path
 
@@ -20,11 +21,19 @@ from pyspark.sql.types import DoubleType, LongType, StringType
 # ============================================================
 
 EBAY_PATH = "/opt/spark/data/raw/external/ebay"
-MERCADO_LIBRE_PATH = "/opt/spark/data/raw/external/mercado_libre"
 RAKUTEN_PATH = "/opt/spark/data/raw/external/rakuten"
+STOCKX_PATH = "/opt/spark/data/raw/external/stockx"
+ETSY_PATH = "/opt/spark/data/raw/external/etsy"
+ADVICE_TH_PATH = "/opt/spark/data/raw/external/advice_th_parquet"
 
-PRODUCTION_OUTPUT_PATH = "/opt/spark/data/processed/products/external_products"
-OUTPUT_PATH = os.getenv("SPARK_PRODUCTS_OUTPUT_PATH", "").strip() or PRODUCTION_OUTPUT_PATH
+PRODUCTION_OUTPUT_PATH = (
+    "/opt/spark/data/processed/products/external_products"
+)
+
+OUTPUT_PATH = (
+    os.getenv("SPARK_PRODUCTS_OUTPUT_PATH", "").strip()
+    or PRODUCTION_OUTPUT_PATH
+)
 
 
 # ============================================================
@@ -164,7 +173,7 @@ def standardize(df, platform_name):
     )
 
     # --------------------------------------------------------
-    # TIMESTAMP
+    # TIMESTAMPS
     # --------------------------------------------------------
 
     df = df.withColumn(
@@ -182,14 +191,14 @@ def standardize(df, platform_name):
         to_timestamp(col("ingestion_timestamp"))
     )
 
-    # observation_date is the daily snapshot date
+    # Daily snapshot date
     df = df.withColumn(
         "observation_date",
         to_date(col("collected_at"))
     )
 
     # --------------------------------------------------------
-    # BASIC DATA QUALITY
+    # DATA QUALITY
     # --------------------------------------------------------
 
     df = df.withColumn(
@@ -246,21 +255,39 @@ def standardize(df, platform_name):
     return df
 
 
+# ============================================================
+# READ OPTIONAL RAW SOURCE
+# ============================================================
+
 def read_optional_source(path, platform_name):
-    """Read a Raw Parquet source when it is present and contains Parquet data."""
+    """
+    Read Raw Parquet when the directory and Parquet files exist.
+    """
+
     source_path = Path(path)
+
     if not source_path.is_dir():
-        print(f"Skipping {platform_name}: input path does not exist")
+        print(
+            f"Skipping {platform_name}: "
+            "input path does not exist"
+        )
         return None
 
     if not any(source_path.rglob("*.parquet")):
-        print(f"Skipping {platform_name}: no Parquet input files found")
+        print(
+            f"Skipping {platform_name}: "
+            "no Parquet input files found"
+        )
         return None
 
     try:
         return spark.read.parquet(path)
+
     except Exception:
-        print(f"Skipping {platform_name}: Parquet input could not be read")
+        print(
+            f"Skipping {platform_name}: "
+            "Parquet input could not be read"
+        )
         return None
 
 
@@ -274,35 +301,62 @@ print("=" * 60)
 
 SOURCE_CONFIGS = [
     ("ebay", EBAY_PATH),
-    ("mercado_libre", MERCADO_LIBRE_PATH),
     ("rakuten", RAKUTEN_PATH),
+    ("stockx", STOCKX_PATH),
+    # Etsy raw Parquet uses the same canonical external schema and can safely
+    # join the idempotent warehouse loader with the other marketplaces.
+    ("etsy", ETSY_PATH),
+    ("advice_th", ADVICE_TH_PATH),
 ]
 
 available_sources = []
+
 print("\nRAW COUNTS")
 print("-" * 60)
+
 for platform_name, input_path in SOURCE_CONFIGS:
-    source_df = read_optional_source(input_path, platform_name)
+
+    source_df = read_optional_source(
+        input_path,
+        platform_name
+    )
+
     if source_df is None:
         continue
 
     raw_count = source_df.count()
-    print(f"{platform_name:<15}: {raw_count:,}")
-    available_sources.append((platform_name, standardize(source_df, platform_name)))
+
+    print(
+        f"{platform_name:<15}: {raw_count:,}"
+    )
+
+    available_sources.append(
+        (
+            platform_name,
+            standardize(source_df, platform_name)
+        )
+    )
+
 
 if not available_sources:
-    raise RuntimeError("No readable external Raw Parquet sources were found")
+    raise RuntimeError(
+        "No readable external Raw Parquet sources were found"
+    )
 
 
 # ============================================================
-# UNION
+# UNION ALL PLATFORMS
 # ============================================================
 
 print("Combining platforms...")
 
 combined_df = available_sources[0][1]
+
 for _, source_df in available_sources[1:]:
-    combined_df = combined_df.unionByName(source_df, allowMissingColumns=True)
+    combined_df = combined_df.unionByName(
+        source_df,
+        allowMissingColumns=True
+    )
 
 
 # ============================================================
@@ -321,11 +375,9 @@ combined_df = combined_df.filter(
 # ============================================================
 # DEDUPLICATION
 #
-# IMPORTANT:
-# Keep one product snapshot PER DAY.
-#
-# Same product on different dates must remain in the dataset
-# so that price history can be analysed later.
+# Keep one product snapshot per day.
+# The same product on different dates remains available
+# for future price history analysis.
 # ============================================================
 
 before_dedup = combined_df.count()
@@ -341,8 +393,7 @@ combined_df = combined_df.dropDuplicates(
 after_dedup = combined_df.count()
 
 duplicates_removed = (
-    before_dedup
-    - after_dedup
+    before_dedup - after_dedup
 )
 
 
@@ -438,7 +489,7 @@ print("-" * 60)
 
 
 # ============================================================
-# SCHEMA
+# FINAL SCHEMA
 # ============================================================
 
 print("\nFINAL SCHEMA")
@@ -448,7 +499,7 @@ combined_df.printSchema()
 
 
 # ============================================================
-# SAMPLE
+# SAMPLE DATA
 # ============================================================
 
 print("\nSAMPLE DATA")

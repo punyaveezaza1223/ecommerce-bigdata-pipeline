@@ -4,6 +4,8 @@
 .env
 .env.*
 !.env.example
+.stockx_oauth_tokens.json
+.stockx-secrets/
 
 # ============================================================
 # Python
@@ -28,10 +30,15 @@ data/curated/
 data/cleaned/
 data/tmp/
 data/temp/
+data/checkpoints/
+data/diagnostics/
+data/lake/
 
 *.parquet
 *.csv
 *.jsonl
+*.sqlite3
+*.crc
 
 # ============================================================
 # Airflow Runtime
@@ -70,11 +77,19 @@ desktop.ini
 # ============================================================
 # Test / Build Artifacts
 # ============================================================
+node_modules/
+.vite/
 .coverage
 htmlcov/
 dist/
 build/
 *.egg-info/
+
+# Local/generated backups (retain locally; do not commit)
+*.backup_*
+*.backup-*
+*.lock*
+project_tree.txt
 
 # ============================================================
 # Legacy / Temporary Ingestion Data

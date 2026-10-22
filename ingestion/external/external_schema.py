@@ -27,48 +27,43 @@ def normalize_product(data):
     """
 
     return {
-        "platform": data.get("platform"),
-        "external_product_id": data.get("external_product_id"),
-        "product_name": data.get("product_name"),
-        "category": data.get("category"),
-        "brand": data.get("brand"),
-        "currency": data.get("currency"),
-        "price": data.get("price"),
-        "original_price": data.get("original_price"),
-        "discount_percent": data.get("discount_percent"),
-        "rating": data.get("rating"),
-        "review_count": data.get("review_count"),
-        "sold_count": data.get("sold_count"),
-        "seller_name": data.get("seller_name"),
-        "product_url": data.get("product_url"),
-        "image_url": data.get("image_url"),
-        "collected_at": data.get("collected_at"),
-        "source_updated_at": data.get("source_updated_at"),
-        "ingestion_timestamp": data.get("ingestion_timestamp"),
-        "raw_source": data.get("raw_source"),
+        column: data.get(column)
+        for column in EXTERNAL_COLUMNS
     }
 
 
 def validate_product(data):
     """
-    Basic validation before writing product data to Raw Data Lake.
+    Validate external marketplace product data.
+
+    Price is optional because some marketplace APIs,
+    such as StockX Catalog Search, provide product
+    metadata without current market prices.
     """
 
     required_fields = [
         "platform",
         "external_product_id",
         "product_name",
-        "price",
     ]
 
     for field in required_fields:
-        if data.get(field) is None:
+        value = data.get(field)
+
+        if value is None:
             return False
 
-    try:
-        if float(data["price"]) < 0:
+        if isinstance(value, str) and not value.strip():
             return False
-    except (TypeError, ValueError):
-        return False
+
+    # Validate price only when a price is available.
+    price = data.get("price")
+
+    if price is not None:
+        try:
+            if float(price) < 0:
+                return False
+        except (TypeError, ValueError, OverflowError):
+            return False
 
     return True
